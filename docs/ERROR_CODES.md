@@ -51,7 +51,28 @@ must not be reassigned once released.
 | 34 | `NoRevenuePoolTransferPending` | Vault | No revenue-pool transfer is pending |
 | 35 | `Slippage` | Vault | Calculated fee in basis points exceeds the caller-supplied `max_fee_bps` limit |
 | 36 | `RateLimited` | Vault | Developer exceeded the configured rate limit |
-| 37 | `ExceedsReserveCap` | Vault | Deposit would exceed the configured per-token reserve cap |
+| 37 | `PausedState` | Vault | Operation is rejected because the vault is paused |
+| 38 | `InvalidHotBps` | Vault | Hot BPS must be between 1 and 10000 |
+| 39 | `InvalidRebalanceThreshold` | Vault | Rebalance threshold must be between 1 and 10000 |
+| 40 | `ColdSignersEmpty` | Vault | Cold signer set cannot be empty |
+| 41 | `InvalidColdThreshold` | Vault | Cold threshold must be between 1 and signer count |
+| 42 | `DuplicateColdSigner` | Vault | Duplicate address found in cold signer set |
+| 43 | `ExceedsReserveCap` | Vault | Deposit would exceed the configured per-token reserve cap |
+| 44 | `CallerNotInAllowlist` | Vault | Caller is not in allowlist and not owner |
+| 45 | `InvalidRecipient` | Vault | Withdrawal recipient is the vault address or USDC token address |
+| 46 | `ZeroAddressRecipient` | Vault | Withdrawal recipient is the zero address |
+| 47 | `InvalidHotBps` | Vault | Hot BPS must be between 1 and 10000 |
+| 48 | `InvalidRebalanceThreshold` | Vault | Rebalance threshold must be between 1 and 10000 |
+| 49 | `AdminCooldownActive` | Vault | A critical admin action is still inside the global cool-off window |
+| 50 | `InvalidAdminCooldown` | Vault | Admin cool-off window is outside the accepted bounds |
+| 51 | `ProposalNotFound` | Vault | No pending timelock proposal for the requested action |
+| 52 | `TimelockNotExpired` | Vault | Action attempted before the timelock window has elapsed |
+| 53 | `TimelockOverflow` | Vault | `proposed_at + window` overflowed `u64` |
+| 54 | `InvalidTimelockWindow` | Vault | Proposed timelock window is outside the allowed `MIN..=MAX` bounds |
+| 55 | `BelowMinTransferAmount` | Vault | Amount is below the vault's configured minimum transfer unit |
+| 56 | `SettlementCannotBeVault` | Vault | Settlement address cannot be the vault contract itself |
+| 57 | `SettlementCannotBeToken` | Vault | Settlement address cannot be the USDC token contract |
+| 58 | `ProposalExpired` | Vault | Proposal has passed its grace period and is no longer executable |
 
 ## Settlement
 
@@ -80,8 +101,33 @@ must not be reassigned once released.
 | 21 | `TimelockNotExpired` | Settlement | Migration delay has not elapsed |
 | 22 | `MigrationBalanceChanged` | Settlement | Approved amount is no longer available |
 | 23 | `OverDraft` | Settlement | Withdrawal amount exceeds the developer's balance |
-| 24 | `InvalidClaimWindow` | Settlement | Claim window end timestamp is before the start timestamp |
-| 25 | `ClaimWindowClosed` | Settlement | Developer attempted to claim outside their configured claim window |
+| 24 | `InvalidClaimWindow` | Settlement | Claim window parameters are invalid |
+| 25 | `ClaimWindowClosed` | Settlement | Developer claim window is not currently open |
+| 26 | `MinBalanceViolation` | Settlement | Withdrawal would leave balance below the minimum |
+| 27 | `ReplayDetected` | Settlement | Settlement request reused or regressed the replay-guard ledger sequence |
+| 28 | `BatchEmpty` | Settlement | Batch operation received an empty vector |
+| 29 | `BatchTooLarge` | Settlement | Batch operation exceeded the maximum allowed size |
+| 30 | `DeveloperFrozen` | Settlement | Developer is frozen and cannot withdraw |
+| 31 | `DeveloperNotFrozen` | Settlement | Developer is not frozen; cannot unfreeze |
+| 32 | `FreezeUnauthorized` | Settlement | Caller is not authorized to freeze/unfreeze |
+| 33 | `WriteRateLimitExceeded` | Settlement | Admin wrote prices too frequently |
+| 34 | `InvalidConfigDistinct` | Settlement | Init config requires distinct admin and vault |
+| 35 | `InvalidConfigAdminContract` | Settlement | Init config forbids the admin being the contract |
+| 36 | `InvalidConfigVaultContract` | Settlement | Init config forbids the vault being the contract |
+| 37 | `InvalidUsdcToken` | Settlement | USDC token address is invalid |
+| 38 | `InvalidRecipient` | Settlement | Withdrawal recipient cannot be the contract |
+| 39 | `NoAdminTransferPending` | Settlement | No admin transfer is pending |
+| 40 | `InvalidVault` | Settlement | Vault address is invalid |
+| 41 | `NoVaultRotationPending` | Settlement | No vault rotation is pending |
+| 42 | `BroadcastMessageTooLong` | Settlement | Admin broadcast message exceeds the maximum length |
+| 43 | `CrossTenantBatch` | Settlement | Batch settlement mixed multiple developers |
+| 44 | `NoUpgradePending` | Settlement | No upgrade proposal is currently pending |
+| 45 | `ZeroWasmHash` | Settlement | Proposed WASM hash is all-zero (rejected) |
+| 46 | `UpgradeTimelockNotExpired` | Settlement | Upgrade timelock delay has not yet elapsed |
+| 47 | `UnsupportedToken` | Settlement | Token is not enabled for settlement payments |
+| 48 | `DuplicateRequestId` | Settlement | Deduction request ID has already been recorded |
+| 49 | `LengthMismatch` | Settlement | Paired batch vectors have different lengths |
+| 50 | `InvalidCursor` | Settlement | Batch cursor is past the end or the limit is zero |
 
 ## Revenue Pool
 
@@ -89,3 +135,35 @@ must not be reassigned once released.
 |------|---------|----------|---------|
 | 1 | `BatchEmpty` | Revenue Pool | `batch_distribute` received an empty `payments` vector |
 | 2 | `BatchTooLarge` | Revenue Pool | `batch_distribute` exceeded `MAX_BATCH_SIZE` |
+| 3 | `NotInitialized` | Revenue Pool | A function was called before `init` |
+| 4 | `AlreadyInitialized` | Revenue Pool | `init` was called more than once |
+| 5 | `Unauthorized` | Revenue Pool | Caller is not authorized for the operation |
+| 6 | `Paused` | Revenue Pool | Distribution is blocked while the pool is paused |
+| 7 | `AlreadyPaused` | Revenue Pool | `pause` was called while the pool was already paused |
+| 8 | `NotPaused` | Revenue Pool | `unpause` was called while the pool was not paused |
+| 9 | `InvalidUsdcToken` | Revenue Pool | USDC address conflicts with the pool or admin address |
+| 10 | `NoAdminTransferPending` | Revenue Pool | No admin transfer is pending |
+| 11 | `NoPauseGuardian` | Revenue Pool | No pause guardian is configured |
+| 12 | `AmountNotPositive` | Revenue Pool | Amount must be greater than zero |
+| 13 | `AmountExceedsMaxDistribute` | Revenue Pool | Amount exceeds the configured per-leg cap |
+| 14 | `InvalidRecipient` | Revenue Pool | Recipient is the revenue pool contract |
+| 15 | `InsufficientBalance` | Revenue Pool | Pool USDC balance is below the requested amount |
+| 16 | `DuplicateRecipient` | Revenue Pool | A batch contains the same recipient more than once |
+| 17 | `Overflow` | Revenue Pool | Checked arithmetic detected an overflow |
+| 18 | `MaxDistributeNotPositive` | Revenue Pool | Distribution cap must be greater than zero |
+| 19 | `MessageEmpty` | Revenue Pool | Admin broadcast message is empty |
+| 20 | `MessageTooLong` | Revenue Pool | Admin broadcast message exceeds the length limit |
+| 21 | `NoPendingEmergencyDrain` | Revenue Pool | No emergency drain proposal is pending |
+| 22 | `TimelockNotExpired` | Revenue Pool | Emergency drain timelock has not elapsed |
+| 23 | `EmergencyPaused` | Revenue Pool | Recovery-only emergency mode is active |
+| 24 | `AlreadyEmergencyPaused` | Revenue Pool | Emergency pause was already active |
+| 25 | `NotEmergencyPaused` | Revenue Pool | Emergency recovery was requested while inactive |
+
+## Upgrade
+
+| Code | Variant | Contract | Meaning |
+|------|---------|----------|---------|
+| 1 | `NotInitialized` | Upgrade | Contract has not been initialized yet |
+| 2 | `AlreadyInitialized` | Upgrade | `init` was called more than once |
+| 3 | `Unauthorized` | Upgrade | Caller is not authorized for the operation |
+| 4 | `InvalidWasmHash` | Upgrade | Provided WASM hash is zero or invalid |
