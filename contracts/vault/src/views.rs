@@ -1,99 +1,99 @@
-//! Read-only views that report what a hypothetical state-changing call *would*
-//! do, without mutating any storage or moving any USDC.
+//! # Read-only views for the Callora Vault contract.
 //!
-//! The vault occasionally accumulates **untracked on-ledger surplus**: USDC
-//! that lives at the vault address but is not reflected in `meta.balance`. The
-//! canonical cause is a third party transferring USDC directly to the vault
-//! contract address bypassing `deposit`, but it can also arise from rounding,
-//! airdrops, or manually-credited recovery funds. The admin recovers this
-//! surplus by calling [`crate::CalloraVault::distribute`], which transfers an
-//! admin-specified amount.
+//! This module hosts the [`CalloraVault::simulate_deduct`] pre-flight view,
+//! which shares [`crate::CalloraVault::validate_deduct`] with
+//! [`crate::CalloraVault::deduct`] to guarantee that their validation
+//! pipelines are identical.
 //!
-//! A "sweep" is the convention of distributing the entire surplus at once.
-//! There is no dedicated `sweep_idle_balance` mutator on this contract; the
-//! sweep is performed by calling `distribute` with `amount` equal to the
-//! amount this dry-run reports.
+//! ## Parameters
+//! `simulate_deduct(env, caller, amount, request_id)` — mirrors the public
+//! signature of `deduct` exactly:
+//! - `env` — the contract environment.
+//! - `caller` — the address that would call `deduct`; checked against the
+//!   authorized-caller role (same check `deduct` performs, but without
+//!   `require_auth`).
+//! - `amount` — deduct amount in USDC stroops.
+//! - `request_id` — `u64` idempotency key, same type as `deduct`.
 //!
-//! The view in this module lets indexers, dashboards, and admins inspect what
-//! a sweep would move **before** they sign the transfer. It performs no auth,
-//! does not bump TTL, and reads only `meta.balance` plus the on-ledger USDC
-//! balance.
+//! ## Guarantees
+//! - **Read-only.** `simulate_deduct` does not write to instance, persistent,
+//!   or temporary storage; does not transfer tokens; does not call into the
+//!   settlement contract; and does not emit events.
+//! - **Auth-free.** It does not call `require_auth`. The `caller` parameter
+//!   is checked against the authorized-caller role, but no on-chain
+//!   authorization signature is required.
+//! - **Parity.** `simulate_deduct` calls `validate_deduct`, which is the same
+//!   function `deduct` calls. For any given vault state and inputs, the error
+//!   returned by `simulate_deduct` is exactly the error `deduct` would return
+//!   at the matching validation step.
+//!
+//! The simulation stops at the validation stage and does not reach the
+//! external call or settlement-credit step — so a vault with no
+//! `settlement` configured would simulate as if it were configured.
+//! Production callers should still call
+//! [`crate::CalloraVault::get_settlement`] before submitting a real `deduct`.
 
-use soroban_sdk::{contractimpl, contracttype, token, Address, Env};
+use soroban_sdk::{contractimpl, Address, Env};
 
-use crate::{CalloraVault, CalloraVaultArgs, CalloraVaultClient, StorageKey, VaultError};
+use crate::errors::VaultError;
+use crate::{CalloraVault, CalloraVaultArgs, CalloraVaultClient};
 
-/// Structured result of [`CalloraVault::dry_run_sweep_idle_balance`].
+/// Read-only pre-flight of [`crate::CalloraVault::deduct`].
 ///
-/// Fields are emitted in a stable order so off-chain decoders can rely on
-/// positional access in addition to `#[contracttype]` decoding.
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct SweepPreview {
-    /// USDC token balance currently held by the vault contract on-ledger.
-    /// Read fresh from the token contract at the moment the view is called.
-    pub on_ledger_balance: i128,
-    /// USDC balance recorded by the vault's internal accounting (`meta.balance`).
-    /// Mutated by `deposit`, `deduct`, `withdraw`, and `withdraw_to`.
-    pub tracked_balance: i128,
-    /// `max(on_ledger_balance - tracked_balance, 0)`.
-    ///
-    /// Saturates at zero when the tracked balance exceeds what the vault holds
-    /// on-ledger (a state that should never arise during normal operation but
-    /// is reported defensively rather than panicking on overflow).
-    pub idle_balance: i128,
-    /// `true` iff `idle_balance > 0` — i.e. a sweep would transfer a non-zero
-    /// amount. Provided so off-chain callers can branch on a single boolean
-    /// without re-deriving the comparison.
-    pub has_idle: bool,
-}
-
+/// Runs [`crate::CalloraVault::validate_deduct`] — the same shared validation
+/// function that `deduct` calls — without performing any state mutation.
+/// Clients use this to predict whether a real `deduct` call would succeed
+/// before signing and submitting a transaction.
+///
+/// # Parameters
+/// - `caller` — address that would call `deduct`. Checked against the
+///   authorized-caller role. **Not authenticated** (no `require_auth`).
+/// - `amount` — amount to deduct in USDC stroops.
+/// - `request_id` — `u64` idempotency key; same type as `deduct`.
+///
+/// # Returns
+/// - `Ok(projected_balance)` — the vault balance after a successful deduct.
+/// - `Err(VaultError)` — the same error variant `deduct` would return at the
+///   matching validation step.
+///
+/// # Errors
+/// Mirrors `deduct`'s validation errors in the same order:
+///
+/// 1. [`VaultError::Unauthorized`] — `caller` is neither the owner nor the
+///    authorized deduct caller. (Auth is not enforced here, but the role check
+///    still runs.)
+/// 2. [`VaultError::Paused`] — vault is paused.
+/// 3. [`VaultError::AmountNotPositive`] — `amount <= 0`.
+/// 4. [`VaultError::BelowMinDeposit`] — `amount < min_deposit`.
+/// 5. [`VaultError::ExceedsMaxDeduct`] — `amount > max_deduct`.
+/// 6. [`VaultError::InsufficientBalance`] — vault balance < `amount`.
+/// 7. [`VaultError::DuplicateRequestId`] — non-zero `request_id` already
+///    processed.
+///
+/// [`VaultError::SettlementNotSet`] and [`VaultError::NotInitialized`] are
+/// **not** raised here — the simulation does not reach the external settlement
+/// call. Callers that need this assurance should additionally call
+/// [`crate::CalloraVault::get_settlement`] before submitting.
 #[contractimpl]
 impl CalloraVault {
-    /// Read-only preview of the amount of untracked on-ledger USDC that a
-    /// sweep (`distribute` called with the returned `idle_balance`) would
-    /// move.
-    ///
-    /// # Returns
-    /// A [`SweepPreview`] populated from the vault's tracked balance and the
-    /// USDC token contract's view of the vault address's on-ledger holdings.
-    ///
-    /// # Errors
-    /// - [`VaultError::NotInitialized`] — `init` has not been called, so
-    ///   neither `meta` nor `UsdcToken` is set.
-    ///
-    /// # Side effects
-    /// None. This function does not write storage, does not require auth, and
-    /// does not bump TTL on any key. It performs one cross-contract `balance`
-    /// call to the configured USDC token contract.
-    pub fn dry_run_sweep_idle_balance(env: Env) -> Result<SweepPreview, VaultError> {
-        let tracked_balance: i128 = env
-            .storage()
-            .instance()
-            .get(&crate::DataKey::Balance)
-            .unwrap_or(0);
-        let usdc_addr: Address = env
-            .storage()
-            .instance()
-            .get(&crate::DataKey::UsdcToken)
-            .ok_or(VaultError::NotInitialized)?;
-        let usdc = token::Client::new(&env, &usdc_addr);
-        let on_ledger = usdc.balance(&env.current_contract_address());
+    /// Read-only pre-flight of `deduct`. See the [`crate::views`] module docs.
+    pub fn simulate_deduct(
+        env: Env,
+        caller: Address,
+        amount: i128,
+        request_id: u64,
+    ) -> Result<i128, VaultError> {
+        let mut items = soroban_sdk::Vec::new(&env);
+        items.push_back((amount, request_id));
+        CalloraVault::validate_deduct_batch(&env, &caller, &items)
+    }
 
-        // Defensive: if the tracked balance somehow exceeds on-ledger USDC
-        // (e.g. a prior accounting bug), saturate at zero rather than reporting
-        // a negative idle balance or panicking on a `checked_sub` failure.
-        let idle = if on_ledger > tracked_balance {
-            on_ledger - tracked_balance
-        } else {
-            0
-        };
-
-        Ok(SweepPreview {
-            on_ledger_balance: on_ledger,
-            tracked_balance,
-            idle_balance: idle,
-            has_idle: idle > 0,
-        })
+    /// Read-only pre-flight of `batch_deduct`.
+    pub fn simulate_batch_deduct(
+        env: Env,
+        caller: Address,
+        items: soroban_sdk::Vec<(i128, u64)>,
+    ) -> Result<i128, VaultError> {
+        CalloraVault::validate_deduct_batch(&env, &caller, &items)
     }
 }

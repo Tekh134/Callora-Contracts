@@ -54,13 +54,15 @@ mod settlement_tests {
     ///
     /// # Returns
     /// The sum of all developer balances in the settlement contract.
+    #[allow(dead_code)]
     pub fn get_total_developer_balances(
         env: &Env,
         settlement_addr: &Address,
         admin: &Address,
+        token: &Address,
     ) -> i128 {
         let client = CalloraSettlementClient::new(env, settlement_addr);
-        let all_balances = client.get_all_developer_balances(admin);
+        let all_balances = client.get_all_developer_balances(admin, token);
         let mut total = 0i128;
         for balance_record in all_balances.iter() {
             total = total
@@ -76,6 +78,7 @@ mod settlement_tests {
     ///
     /// # Returns
     /// The current `total_balance` of the global settlement pool.
+    #[allow(dead_code)]
     pub fn get_settlement_pool_balance(env: &Env, settlement_addr: &Address) -> i128 {
         let client = CalloraSettlementClient::new(env, settlement_addr);
         let global_pool = client.get_global_pool();
@@ -2100,7 +2103,7 @@ mod settlement_tests {
 
         let items: soroban_sdk::Vec<(Address, i128)> = soroban_sdk::Vec::new(&env);
         let result = client.try_batch_receive_payment(&vault, &items, &token, &1u32);
-        assert!(result.is_err());
+        assert!(is_error(result, SettlementError::BatchEmpty));
     }
 
     #[test]
@@ -2115,7 +2118,7 @@ mod settlement_tests {
             items.push_back((dev.clone(), 1i128));
         }
         let result = client.try_batch_receive_payment(&vault, &items, &token, &1u32);
-        assert!(result.is_err());
+        assert!(is_error(result, SettlementError::BatchTooLarge));
     }
 
     #[test]
@@ -2127,7 +2130,7 @@ mod settlement_tests {
         let mut items = soroban_sdk::Vec::new(&env);
         items.push_back((dev.clone(), 0i128));
         let result = client.try_batch_receive_payment(&vault, &items, &token, &1u32);
-        assert!(result.is_err());
+        assert!(is_error(result, SettlementError::AmountNotPositive));
     }
 
     #[test]
@@ -2139,7 +2142,7 @@ mod settlement_tests {
         let mut items = soroban_sdk::Vec::new(&env);
         items.push_back((dev.clone(), -1i128));
         let result = client.try_batch_receive_payment(&vault, &items, &token, &1u32);
-        assert!(result.is_err());
+        assert!(is_error(result, SettlementError::AmountNotPositive));
     }
 
     #[test]
@@ -2185,6 +2188,105 @@ mod settlement_tests {
         for dev in &devs {
             assert_eq!(client.get_developer_balance(dev, &token), 1i128);
         }
+    }
+
+    // ── batch_settle tests ───────────────────────────────────────────────────
+
+    #[test]
+    fn test_batch_settle_single_developer_succeeds() {
+        let (env, addr, _admin, vault, _third_party, token) = setup_contract();
+        let client = CalloraSettlementClient::new(&env, &addr);
+        let dev = Address::generate(&env);
+
+        let mut items = soroban_sdk::Vec::new(&env);
+        items.push_back((dev.clone(), 100i128));
+
+        let outcomes = client.batch_settle(&vault, &items, &token, &1u32);
+        assert_eq!(outcomes.len(), 1);
+        assert_eq!(client.get_developer_balance(&dev, &token), 100i128);
+    }
+
+    #[test]
+    fn test_batch_settle_mixed_developers_returns_cross_tenant_batch() {
+        let (env, addr, _admin, vault, _third_party, token) = setup_contract();
+        let client = CalloraSettlementClient::new(&env, &addr);
+        let dev1 = Address::generate(&env);
+        let dev2 = Address::generate(&env);
+
+        let mut items = soroban_sdk::Vec::new(&env);
+        items.push_back((dev1.clone(), 100i128));
+        items.push_back((dev2.clone(), 200i128));
+
+        let result = client.try_batch_settle(&vault, &items, &token, &1u32);
+        assert!(
+            is_error(result, SettlementError::CrossTenantBatch),
+            "mixed-developer batch must return CrossTenantBatch"
+        );
+        // No balances should be credited on a rejected batch.
+        assert_eq!(client.get_developer_balance(&dev1, &token), 0i128);
+        assert_eq!(client.get_developer_balance(&dev2, &token), 0i128);
+    }
+
+    #[test]
+    fn test_batch_settle_rejects_oversized_batch() {
+        use crate::MAX_BATCH_SIZE;
+        let (env, addr, _admin, vault, _third_party, token) = setup_contract();
+        let client = CalloraSettlementClient::new(&env, &addr);
+        let dev = Address::generate(&env);
+
+        let mut items = soroban_sdk::Vec::new(&env);
+        for _ in 0..=MAX_BATCH_SIZE {
+            items.push_back((dev.clone(), 1i128));
+        }
+        let result = client.try_batch_settle(&vault, &items, &token, &1u32);
+        assert!(
+            is_error(result, SettlementError::BatchTooLarge),
+            "batch above MAX_BATCH_SIZE must return BatchTooLarge"
+        );
+    }
+
+    #[test]
+    fn test_batch_settle_max_batch_size_accepted() {
+        use crate::MAX_BATCH_SIZE;
+        let (env, addr, _admin, vault, _third_party, token) = setup_contract();
+        let client = CalloraSettlementClient::new(&env, &addr);
+        let dev = Address::generate(&env);
+
+        let mut items = soroban_sdk::Vec::new(&env);
+        for _ in 0..MAX_BATCH_SIZE {
+            items.push_back((dev.clone(), 1i128));
+        }
+        let outcomes = client.batch_settle(&vault, &items, &token, &1u32);
+        assert_eq!(outcomes.len(), MAX_BATCH_SIZE);
+        assert_eq!(
+            client.get_developer_balance(&dev, &token),
+            MAX_BATCH_SIZE as i128
+        );
+    }
+
+    #[test]
+    fn test_batch_settle_rejects_empty_batch() {
+        let (env, addr, _admin, vault, _third_party, token) = setup_contract();
+        let client = CalloraSettlementClient::new(&env, &addr);
+
+        let items: soroban_sdk::Vec<(Address, i128)> = soroban_sdk::Vec::new(&env);
+        let result = client.try_batch_settle(&vault, &items, &token, &1u32);
+        assert!(
+            is_error(result, SettlementError::BatchEmpty),
+            "empty batch must return BatchEmpty"
+        );
+    }
+
+    #[test]
+    fn test_batch_settle_unauthorized_caller_rejected() {
+        let (env, addr, _admin, _vault, third_party, token) = setup_contract();
+        let client = CalloraSettlementClient::new(&env, &addr);
+        let dev = Address::generate(&env);
+
+        let mut items = soroban_sdk::Vec::new(&env);
+        items.push_back((dev.clone(), 100i128));
+        let result = client.try_batch_settle(&third_party, &items, &token, &1u32);
+        assert!(is_error(result, SettlementError::Unauthorized));
     }
 
     // ── force_credit_developer tests ─────────────────────────────────────────
@@ -2725,6 +2827,33 @@ mod settlement_tests {
     }
 
     #[test]
+    fn test_daily_cap_rejects_negative_without_changes() {
+        use soroban_sdk::IntoVal;
+
+        let (env, addr, admin, _vault, _third_party, _token) = setup_contract();
+        let client = CalloraSettlementClient::new(&env, &addr);
+        let developer = Address::generate(&env);
+
+        client.set_daily_withdraw_cap(&admin, &developer, &1000i128);
+        let result = client.try_set_daily_withdraw_cap(&admin, &developer, &-1i128);
+
+        assert!(is_error(result, SettlementError::AmountNotPositive));
+        assert_eq!(client.get_daily_withdraw_cap(&developer), 1000i128);
+
+        let cap_events = env
+            .events()
+            .all()
+            .iter()
+            .filter(|event| {
+                !event.1.is_empty()
+                    && event.1.get(0).unwrap().into_val::<Symbol>(&env)
+                        == Symbol::new(&env, "daily_withdraw_cap_changed")
+            })
+            .count();
+        assert_eq!(cap_events, 1);
+    }
+
+    #[test]
     fn test_get_daily_withdraw_cap_returns_zero_when_unset() {
         let (env, addr, _admin, _vault, _third_party, _token) = setup_contract();
         let client = CalloraSettlementClient::new(&env, &addr);
@@ -3239,6 +3368,7 @@ mod settlement_tests {
             &false,
             &Some(developer.clone()),
             &usdc_address,
+            &100,
         );
         usdc_admin_client.mint(&addr, &100i128);
 
@@ -3317,6 +3447,7 @@ mod settlement_tests {
             &false,
             &Some(developer.clone()),
             &usdc_address,
+            &100,
         );
         usdc_admin_client.mint(&addr, &100i128);
 
@@ -3351,6 +3482,7 @@ mod settlement_tests {
             &false,
             &Some(developer.clone()),
             &usdc_address,
+            &100,
         );
         usdc_admin_client.mint(&addr, &100i128);
 
@@ -3380,6 +3512,7 @@ mod settlement_tests {
             &false,
             &Some(developer.clone()),
             &usdc_address,
+            &100,
         );
         usdc_admin_client.mint(&addr, &100i128);
         client.set_developer_claim_window(&admin, &developer, &1_000u64, &2_000u64);
@@ -3420,6 +3553,7 @@ mod settlement_tests {
             &false,
             &Some(developer.clone()),
             &usdc_address,
+            &100,
         );
         usdc_admin_client.mint(&addr, &100i128);
         client.set_developer_claim_window(&admin, &developer, &1_000u64, &2_000u64);
@@ -3447,8 +3581,22 @@ mod settlement_tests {
 
         client.init(&admin, &vault);
         client.set_usdc_token(&admin, &usdc_address);
-        client.receive_payment(&vault, &100i128, &false, &Some(dev1.clone()), &usdc_address);
-        client.receive_payment(&vault, &100i128, &false, &Some(dev2.clone()), &usdc_address);
+        client.receive_payment(
+            &vault,
+            &100i128,
+            &false,
+            &Some(dev1.clone()),
+            &usdc_address,
+            &100,
+        );
+        client.receive_payment(
+            &vault,
+            &100i128,
+            &false,
+            &Some(dev2.clone()),
+            &usdc_address,
+            &100,
+        );
         usdc_admin_client.mint(&addr, &200i128);
 
         // dev1's window already closed; dev2 has no window (unrestricted).

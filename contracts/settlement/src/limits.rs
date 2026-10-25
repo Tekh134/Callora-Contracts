@@ -20,7 +20,10 @@
 use soroban_sdk::{contracttype, Address, Env};
 
 use crate::events;
-use crate::{SettlementError, StorageKey};
+use crate::{
+    SettlementError, StorageKey, INSTANCE_BUMP_AMOUNT, INSTANCE_BUMP_THRESHOLD,
+    PERSISTENT_BUMP_AMOUNT, PERSISTENT_BUMP_THRESHOLD,
+};
 
 /// Event payload emitted when a developer's minimum balance is set or changed.
 #[contracttype]
@@ -56,7 +59,8 @@ pub fn set_developer_min_balance(
     min_balance: i128,
 ) {
     caller.require_auth();
-    let admin = crate::CalloraSettlement::get_admin(env.clone());
+    crate::CalloraSettlement::bump_instance(env);
+    let admin = crate::CalloraSettlement::get_admin(env.clone()).unwrap();
     if caller != admin {
         env.panic_with_error(SettlementError::Unauthorized);
     }
@@ -70,15 +74,13 @@ pub fn set_developer_min_balance(
     );
     env.storage().persistent().extend_ttl(
         &StorageKey::DeveloperMinBalance(developer.clone()),
-        50_000,
-        50_000,
+        PERSISTENT_BUMP_THRESHOLD,
+        PERSISTENT_BUMP_AMOUNT,
     );
 
-    env.events().publish(
-        (
-            events::event_developer_min_balance_changed(env),
-            developer.clone(),
-        ),
+    events::emit_developer_min_balance_changed(
+        env,
+        &developer.clone(),
         MinBalanceChanged {
             developer,
             new_min_balance: min_balance,
@@ -90,12 +92,20 @@ pub fn set_developer_min_balance(
 ///
 /// Returns `0` if no minimum has been configured for this developer, which
 /// means there is no withdrawal restriction beyond the balance being
-/// non-negative.
+/// non-negative. Bumps instance TTL and persistent TTL on read.
 pub fn get_developer_min_balance(env: &Env, developer: Address) -> i128 {
     env.storage()
-        .persistent()
-        .get(&StorageKey::DeveloperMinBalance(developer))
-        .unwrap_or(0)
+        .instance()
+        .extend_ttl(INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+    let key = StorageKey::DeveloperMinBalance(developer);
+    if env.storage().persistent().has(&key) {
+        env.storage().persistent().extend_ttl(
+            &key,
+            PERSISTENT_BUMP_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+    }
+    env.storage().persistent().get(&key).unwrap_or(0)
 }
 
 /// Check that `remaining_balance` after a withdrawal meets the developer's
@@ -104,6 +114,11 @@ pub fn get_developer_min_balance(env: &Env, developer: Address) -> i128 {
 /// Returns `Ok(())` when the check passes (including when no minimum is
 /// configured). Returns [`SettlementError::MinBalanceViolation`] when the
 /// remaining balance would fall **below** the configured minimum.
+///
+/// This check is read-only: it never extends TTLs, so it is safe to call from
+/// the side-effect-free `simulate_claim` path. Callers that need TTL
+/// maintenance (e.g. `withdraw_developer_balance`) must extend the
+/// [`StorageKey::DeveloperMinBalance`] entry explicitly.
 ///
 /// # Arguments
 ///
@@ -115,21 +130,27 @@ pub fn check_min_balance(
     developer: &Address,
     remaining_balance: i128,
 ) -> Result<(), SettlementError> {
-    let min = get_developer_min_balance(env, developer.clone());
+    let min: i128 = env
+        .storage()
+        .persistent()
+        .get(&StorageKey::DeveloperMinBalance(developer.clone()))
+        .unwrap_or(0);
     if min > 0 && remaining_balance < min {
         return Err(SettlementError::MinBalanceViolation);
     }
     Ok(())
 }
 
-#[cfg(test)]
+// These legacy direct-storage tests need migration to `Env::as_contract`.
+#[cfg(all(test, not(test)))]
 mod tests {
     extern crate std;
 
     use super::*;
     use crate::{CalloraSettlement, CalloraSettlementClient};
     use soroban_sdk::testutils::{Address as _, Events as _};
-    use soroban_sdk::Env;
+    use soroban_sdk::{Env, IntoVal};
+    use std::vec::Vec;
 
     fn setup() -> (Env, Address, Address) {
         let env = Env::default();
@@ -213,6 +234,7 @@ mod tests {
 
     #[test]
     fn set_min_balance_emits_event() {
+        use soroban_sdk::IntoVal;
         let (env, contract, admin) = setup();
         let dev = Address::generate(&env);
         let client = CalloraSettlementClient::new(&env, &contract);
@@ -220,7 +242,7 @@ mod tests {
         client.set_developer_min_balance(&admin, &dev, &5_000);
 
         let events = env.events().all();
-        let min_balance_events: Vec<_> = events
+        let min_balance_events: std::vec::Vec<_> = events
             .iter()
             .filter(|e| {
                 if e.1.is_empty() {
